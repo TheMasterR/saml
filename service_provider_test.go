@@ -141,6 +141,28 @@ func TestSPCanProduceMetadata(t *testing.T) {
 		string(spMetadata))
 }
 
+func TestCanProduceMetadataNoSigningKey(t *testing.T) {
+	test := NewServiceProviderTest()
+	s := ServiceProvider{
+		MetadataURL: mustParseURL("https://example.com/saml2/metadata"),
+		AcsURL:      mustParseURL("https://example.com/saml2/acs"),
+		IDPMetadata: &EntityDescriptor{},
+	}
+	err := xml.Unmarshal([]byte(test.IDPMetadata), &s.IDPMetadata)
+	assert.NoError(t, err)
+
+	spMetadata, err := xml.MarshalIndent(s.Metadata(), "", "  ")
+	assert.NoError(t, err)
+	assert.Equal(t, ""+
+		"<EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" validUntil=\"2015-12-03T01:57:09Z\" entityID=\"https://example.com/saml2/metadata\">\n"+
+		"  <SPSSODescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" validUntil=\"2015-12-03T01:57:09Z\" protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\" AuthnRequestsSigned=\"false\" WantAssertionsSigned=\"true\">\n"+
+		"    <SingleLogoutService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" Location=\"\"></SingleLogoutService>\n"+
+		"    <AssertionConsumerService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" Location=\"https://example.com/saml2/acs\" index=\"1\"></AssertionConsumerService>\n"+
+		"  </SPSSODescriptor>\n"+
+		"</EntityDescriptor>",
+		string(spMetadata))
+}
+
 func TestSPCanProduceRedirectRequest(t *testing.T) {
 	test := NewServiceProviderTest()
 	TimeNow = func() time.Time {
@@ -692,6 +714,53 @@ func addSignatureToDocument(doc *etree.Document) *etree.Document {
 	return doc
 }
 
+func removeDestinationFromDocument(doc *etree.Document) *etree.Document {
+	responseEl := doc.FindElement("//Response")
+	responseEl.RemoveAttr("Destination")
+	return doc
+}
+
+func TestServiceProviderMismatchedDestinationsWithSignaturePresent(t *testing.T) {
+	test := NewServiceProviderTest()
+	s := ServiceProvider{
+		Key:         test.Key,
+		Certificate: test.Certificate,
+		MetadataURL: mustParseURL("https://15661444.ngrok.io/saml2/metadata"),
+		AcsURL:      mustParseURL("https://15661444.ngrok.io/saml2/acs"),
+		IDPMetadata: &EntityDescriptor{},
+	}
+	err := xml.Unmarshal([]byte(test.IDPMetadata), &s.IDPMetadata)
+	assert.NoError(t, err)
+
+	req := http.Request{PostForm: url.Values{}}
+	s.AcsURL = mustParseURL("https://wrong/saml2/acs")
+	bytes, _ := addSignatureToDocument(test.responseDom()).WriteToBytes()
+	req.PostForm.Set("SAMLResponse", base64.StdEncoding.EncodeToString(bytes))
+	_, err = s.ParseResponse(&req, []string{"id-9e61753d64e928af5a7a341a97f420c9"})
+	assert.EqualError(t, err.(*InvalidResponseError).PrivateErr,
+		"`Destination` does not match AcsURL (expected \"https://wrong/saml2/acs\", actual \"https://15661444.ngrok.io/saml2/acs\")")
+}
+
+func TestServiceProviderMissingDestinationWithSignaturePresent(t *testing.T) {
+	test := NewServiceProviderTest()
+	s := ServiceProvider{
+		Key:         test.Key,
+		Certificate: test.Certificate,
+		MetadataURL: mustParseURL("https://15661444.ngrok.io/saml2/metadata"),
+		AcsURL:      mustParseURL("https://15661444.ngrok.io/saml2/acs"),
+		IDPMetadata: &EntityDescriptor{},
+	}
+	err := xml.Unmarshal([]byte(test.IDPMetadata), &s.IDPMetadata)
+	assert.NoError(t, err)
+
+	req := http.Request{PostForm: url.Values{}}
+	bytes, _ := removeDestinationFromDocument(addSignatureToDocument(test.responseDom())).WriteToBytes()
+	req.PostForm.Set("SAMLResponse", base64.StdEncoding.EncodeToString(bytes))
+	_, err = s.ParseResponse(&req, []string{"id-9e61753d64e928af5a7a341a97f420c9"})
+	assert.EqualError(t, err.(*InvalidResponseError).PrivateErr,
+		"`Destination` does not match AcsURL (expected \"https://15661444.ngrok.io/saml2/acs\", actual \"\")")
+}
+
 func TestSPMismatchedDestinationsWithSignaturePresent(t *testing.T) {
 	test := NewServiceProviderTest()
 	s := ServiceProvider{
@@ -798,7 +867,7 @@ func TestSPInvalidResponses(t *testing.T) {
 	_, err = s.ParseResponse(&req, []string{"id-9e61753d64e928af5a7a341a97f420c9"})
 	assert.EqualError(t,
 		err.(*InvalidResponseError).PrivateErr,
-		"IssueInstant expired at 2015-12-01 01:57:51.375 +0000 UTC")
+		"response IssueInstant expired at 2015-12-01 01:57:51.375 +0000 UTC")
 	TimeNow = func() time.Time {
 		rv, _ := time.Parse("Mon Jan 2 15:04:05 MST 2006", "Mon Dec 1 01:57:09 UTC 2015")
 		return rv
@@ -810,7 +879,7 @@ func TestSPInvalidResponses(t *testing.T) {
 	_, err = s.ParseResponse(&req, []string{"id-9e61753d64e928af5a7a341a97f420c9"})
 	assert.EqualError(t,
 		err.(*InvalidResponseError).PrivateErr,
-		"Issuer does not match the IDP metadata (expected \"http://snakeoil.com\")")
+		"response Issuer does not match the IDP metadata (expected \"http://snakeoil.com\")")
 	s.IDPMetadata.EntityID = "https://idp.testshib.org/idp/shibboleth"
 
 	oldSpStatusSuccess := StatusSuccess
@@ -819,7 +888,7 @@ func TestSPInvalidResponses(t *testing.T) {
 	_, err = s.ParseResponse(&req, []string{"id-9e61753d64e928af5a7a341a97f420c9"})
 	assert.EqualError(t,
 		err.(*InvalidResponseError).PrivateErr,
-		"Status code was not not:the:success:value")
+		"urn:oasis:names:tc:SAML:2.0:status:Success")
 	StatusSuccess = oldSpStatusSuccess
 
 	s.IDPMetadata.IDPSSODescriptors[0].KeyDescriptors[0].KeyInfo.Certificate = "invalid"
@@ -882,35 +951,35 @@ func TestSPInvalidAssertions(t *testing.T) {
 	xml.Unmarshal(assertionBuf, &assertion)
 
 	err = s.validateAssertion(&assertion, []string{"any request id"}, TimeNow())
-	assert.EqualError(t, err, "SubjectConfirmation one of the possible request IDs ([any request id])")
+	assert.EqualError(t, err, "assertion SubjectConfirmation one of the possible request IDs ([any request id])")
 
 	assertion.Subject.SubjectConfirmations[0].SubjectConfirmationData.Recipient = "wrong/acs/url"
 	err = s.validateAssertion(&assertion, []string{"id-9e61753d64e928af5a7a341a97f420c9"}, TimeNow())
-	assert.EqualError(t, err, "SubjectConfirmation Recipient is not https://15661444.ngrok.io/saml2/acs")
+	assert.EqualError(t, err, "assertion SubjectConfirmation Recipient is not https://15661444.ngrok.io/saml2/acs")
 	assertion = Assertion{}
 	xml.Unmarshal(assertionBuf, &assertion)
 
 	assertion.Subject.SubjectConfirmations[0].SubjectConfirmationData.NotOnOrAfter = TimeNow().Add(-1 * time.Hour)
 	err = s.validateAssertion(&assertion, []string{"id-9e61753d64e928af5a7a341a97f420c9"}, TimeNow())
-	assert.EqualError(t, err, "SubjectConfirmationData is expired")
+	assert.EqualError(t, err, "assertion SubjectConfirmationData is expired")
 	assertion = Assertion{}
 	xml.Unmarshal(assertionBuf, &assertion)
 
 	assertion.Conditions.NotBefore = TimeNow().Add(time.Hour)
 	err = s.validateAssertion(&assertion, []string{"id-9e61753d64e928af5a7a341a97f420c9"}, TimeNow())
-	assert.EqualError(t, err, "Conditions is not yet valid")
+	assert.EqualError(t, err, "assertion Conditions is not yet valid")
 	assertion = Assertion{}
 	xml.Unmarshal(assertionBuf, &assertion)
 
 	assertion.Conditions.NotOnOrAfter = TimeNow().Add(-1 * time.Hour)
 	err = s.validateAssertion(&assertion, []string{"id-9e61753d64e928af5a7a341a97f420c9"}, TimeNow())
-	assert.EqualError(t, err, "Conditions is expired")
+	assert.EqualError(t, err, "assertion Conditions is expired")
 	assertion = Assertion{}
 	xml.Unmarshal(assertionBuf, &assertion)
 
 	assertion.Conditions.AudienceRestrictions[0].Audience.Value = "not/our/metadata/url"
 	err = s.validateAssertion(&assertion, []string{"id-9e61753d64e928af5a7a341a97f420c9"}, TimeNow())
-	assert.EqualError(t, err, "Conditions AudienceRestriction does not contain \"https://15661444.ngrok.io/saml2/metadata\"")
+	assert.EqualError(t, err, "assertion Conditions AudienceRestriction does not contain \"https://15661444.ngrok.io/saml2/metadata\"")
 	assertion = Assertion{}
 	xml.Unmarshal(assertionBuf, &assertion)
 
@@ -1040,4 +1109,101 @@ DgefdDXhYNmeuQtwGtcu/FI66atQMNTDoChXJQ==</ds:Modulus><ds:Exponent>AQAB</ds:Expon
 		assert.NoError(t, err.(*InvalidResponseError).PrivateErr)
 	}
 	assert.NoError(t, err)
+}
+
+func TestServiceProviderCanHandleSignedAssertionsResponse(t *testing.T) {
+	test := NewServiceProviderTest()
+
+	// Note: This test uses an actual response from onelogin, submitted by a user.
+	// However, the test data below isn't actually valid -- the issue instant is
+	// before the certificate's issued time. In order to preserve this test data and
+	// signatures, we assign a different time to Clock, used by xmldsig than to
+	// TimeNow which is used to verify the issue time of the SAML assertion.
+
+	Clock = dsig.NewFakeClockAt(func() time.Time {
+		rv, _ := time.Parse(timeFormat, "2014-07-17T14:12:57Z")
+		return rv
+	}())
+	TimeNow = func() time.Time {
+		rv, _ := time.Parse(timeFormat, "2014-07-17T01:02:59Z")
+		return rv
+	}
+
+	SamlResponse := `PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfOGU4ZGM1ZjY5YTk4Y2M0YzFmZjM0MjdlNWNlMzQ2MDZmZDY3MmY5MWU2IiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAxNC0wNy0xN1QwMTowMTo0OFoiIERlc3RpbmF0aW9uPSJodHRwOi8vc3AuZXhhbXBsZS5jb20vZGVtbzEvaW5kZXgucGhwP2FjcyIgSW5SZXNwb25zZVRvPSJPTkVMT0dJTl80ZmVlM2IwNDYzOTVjNGU3NTEwMTFlOTdmODkwMGI1MjczZDU2Njg1Ij4KICA8c2FtbDpJc3N1ZXI+aHR0cDovL2lkcC5leGFtcGxlLmNvbS9tZXRhZGF0YS5waHA8L3NhbWw6SXNzdWVyPgogIDxzYW1scDpTdGF0dXM+CiAgICA8c2FtbHA6U3RhdHVzQ29kZSBWYWx1ZT0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOnN0YXR1czpTdWNjZXNzIi8+CiAgPC9zYW1scDpTdGF0dXM+CiAgPHNhbWw6QXNzZXJ0aW9uIHhtbG5zOnhzaT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS9YTUxTY2hlbWEtaW5zdGFuY2UiIHhtbG5zOnhzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgSUQ9InBmeDA0NjkwMGM1LTA0MjMtMzVjYi0yYWRiLTcyMjgzYmE1ZDhjZCIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMTQtMDctMTdUMDE6MDE6NDhaIj4KICAgIDxzYW1sOklzc3Vlcj5odHRwOi8vaWRwLmV4YW1wbGUuY29tL21ldGFkYXRhLnBocDwvc2FtbDpJc3N1ZXI+PGRzOlNpZ25hdHVyZSB4bWxuczpkcz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC8wOS94bWxkc2lnIyI+CiAgPGRzOlNpZ25lZEluZm8+PGRzOkNhbm9uaWNhbGl6YXRpb25NZXRob2QgQWxnb3JpdGhtPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxLzEwL3htbC1leGMtYzE0biMiLz4KICAgIDxkczpTaWduYXR1cmVNZXRob2QgQWxnb3JpdGhtPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjcnNhLXNoYTEiLz4KICA8ZHM6UmVmZXJlbmNlIFVSST0iI3BmeDA0NjkwMGM1LTA0MjMtMzVjYi0yYWRiLTcyMjgzYmE1ZDhjZCI+PGRzOlRyYW5zZm9ybXM+PGRzOlRyYW5zZm9ybSBBbGdvcml0aG09Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyNlbnZlbG9wZWQtc2lnbmF0dXJlIi8+PGRzOlRyYW5zZm9ybSBBbGdvcml0aG09Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvMTAveG1sLWV4Yy1jMTRuIyIvPjwvZHM6VHJhbnNmb3Jtcz48ZHM6RGlnZXN0TWV0aG9kIEFsZ29yaXRobT0iaHR0cDovL3d3dy53My5vcmcvMjAwMC8wOS94bWxkc2lnI3NoYTEiLz48ZHM6RGlnZXN0VmFsdWU+YmV5ZnFIOXMxUys2bDJHQkhiU2xXOFR4SzZFPTwvZHM6RGlnZXN0VmFsdWU+PC9kczpSZWZlcmVuY2U+PC9kczpTaWduZWRJbmZvPjxkczpTaWduYXR1cmVWYWx1ZT5DSkJMY0pVTm91Q0psY3d5YUtTb1RGdHJUYVJOUWJnWHJFUUdKTmZsdjJkakx0M3J0d2krRzZMd3VQZkQrckF5b3lIbXFyUXlTaVJaZ1lNeWN1bk8vNUQ2R2J5ZVhJVjNrc093Y0YrQXlWZGtrblVpcVN3SDcvOXJkdkVhZmtKcDQ3d1pYKzc4dlFGMDZNcjFnNEpsODByTmNEUncxeE9FdW9QN2pDMjVtMVE9PC9kczpTaWduYXR1cmVWYWx1ZT4KPGRzOktleUluZm8+PGRzOlg1MDlEYXRhPjxkczpYNTA5Q2VydGlmaWNhdGU+TUlJQ2FqQ0NBZE9nQXdJQkFnSUJBREFOQmdrcWhraUc5dzBCQVEwRkFEQlNNUXN3Q1FZRFZRUUdFd0oxY3pFVE1CRUdBMVVFQ0F3S1EyRnNhV1p2Y201cFlURVZNQk1HQTFVRUNnd01UMjVsYkc5bmFXNGdTVzVqTVJjd0ZRWURWUVFEREE1emNDNWxlR0Z0Y0d4bExtTnZiVEFlRncweE5EQTNNVGN4TkRFeU5UWmFGdzB4TlRBM01UY3hOREV5TlRaYU1GSXhDekFKQmdOVkJBWVRBblZ6TVJNd0VRWURWUVFJREFwRFlXeHBabTl5Ym1saE1SVXdFd1lEVlFRS0RBeFBibVZzYjJkcGJpQkpibU14RnpBVkJnTlZCQU1NRG5Od0xtVjRZVzF3YkdVdVkyOXRNSUdmTUEwR0NTcUdTSWIzRFFFQkFRVUFBNEdOQURDQmlRS0JnUURaeCtPTjRJVW9JV3hndWtUYjF0T2lYM2JNWXpZUWl3V1BVTk1wK0ZxODJ4b05vZ3NvMmJ5a1pHMHlpSm01bzh6di9zZDZwR291YXlNZ2t4LzJGU09kYzM2VDBqR2JDSHVSU2J0aWEwUEV6TklSdG1WaU1ydDNBZW9XQmlkUlhtWnN4Q05Md2dJVjZkbjJXcHVFNUF6MGJIZ3BablF4VEtGZWswQk1LVS9kOHdJREFRQUJvMUF3VGpBZEJnTlZIUTRFRmdRVUdIeFlxWll5WDdjVHhLVk9EVmdad1NUZENud3dId1lEVlIwakJCZ3dGb0FVR0h4WXFaWXlYN2NUeEtWT0RWZ1p3U1RkQ253d0RBWURWUjBUQkFVd0F3RUIvekFOQmdrcWhraUc5dzBCQVEwRkFBT0JnUUJ5Rk9sK2hNRklDYmQzREpmbnAyUmdkL2RxdHRzWkcvdHloSUxXdkVyYmlvL0RFZTk4bVhwb3doVGtDMDRFTnByT3lYaTdaYlVxaWljRjg5dUFHeXQxb3FnVFVDRDFWc0xhaHFJY21yemd1bU55VHdMR1dvMTdXREFhMS91c0RoZXRXQU1oZ3pGL0NuZjVlazBuSzAwbTBZWkd5YzRMemdEMENST01BU1RXTmc9PTwvZHM6WDUwOUNlcnRpZmljYXRlPjwvZHM6WDUwOURhdGE+PC9kczpLZXlJbmZvPjwvZHM6U2lnbmF0dXJlPgogICAgPHNhbWw6U3ViamVjdD4KICAgICAgPHNhbWw6TmFtZUlEIFNQTmFtZVF1YWxpZmllcj0iaHR0cDovL3NwLmV4YW1wbGUuY29tL2RlbW8xL21ldGFkYXRhLnBocCIgRm9ybWF0PSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6bmFtZWlkLWZvcm1hdDp0cmFuc2llbnQiPl9jZTNkMjk0OGI0Y2YyMDE0NmRlZTBhMGIzZGQ2ZjY5YjZjZjg2ZjYyZDc8L3NhbWw6TmFtZUlEPgogICAgICA8c2FtbDpTdWJqZWN0Q29uZmlybWF0aW9uIE1ldGhvZD0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOmNtOmJlYXJlciI+CiAgICAgICAgPHNhbWw6U3ViamVjdENvbmZpcm1hdGlvbkRhdGEgTm90T25PckFmdGVyPSIyMDI0LTAxLTE4VDA2OjIxOjQ4WiIgUmVjaXBpZW50PSJodHRwOi8vc3AuZXhhbXBsZS5jb20vZGVtbzEvaW5kZXgucGhwP2FjcyIgSW5SZXNwb25zZVRvPSJPTkVMT0dJTl80ZmVlM2IwNDYzOTVjNGU3NTEwMTFlOTdmODkwMGI1MjczZDU2Njg1Ii8+CiAgICAgIDwvc2FtbDpTdWJqZWN0Q29uZmlybWF0aW9uPgogICAgPC9zYW1sOlN1YmplY3Q+CiAgICA8c2FtbDpDb25kaXRpb25zIE5vdEJlZm9yZT0iMjAxNC0wNy0xN1QwMTowMToxOFoiIE5vdE9uT3JBZnRlcj0iMjAyNC0wMS0xOFQwNjoyMTo0OFoiPgogICAgICA8c2FtbDpBdWRpZW5jZVJlc3RyaWN0aW9uPgogICAgICAgIDxzYW1sOkF1ZGllbmNlPmh0dHA6Ly9zcC5leGFtcGxlLmNvbS9kZW1vMS9tZXRhZGF0YS5waHA8L3NhbWw6QXVkaWVuY2U+CiAgICAgIDwvc2FtbDpBdWRpZW5jZVJlc3RyaWN0aW9uPgogICAgPC9zYW1sOkNvbmRpdGlvbnM+CiAgICA8c2FtbDpBdXRoblN0YXRlbWVudCBBdXRobkluc3RhbnQ9IjIwMTQtMDctMTdUMDE6MDE6NDhaIiBTZXNzaW9uTm90T25PckFmdGVyPSIyMDI0LTA3LTE3VDA5OjAxOjQ4WiIgU2Vzc2lvbkluZGV4PSJfYmU5OTY3YWJkOTA0ZGRjYWUzYzBlYjQxODlhZGJlM2Y3MWUzMjdjZjkzIj4KICAgICAgPHNhbWw6QXV0aG5Db250ZXh0PgogICAgICAgIDxzYW1sOkF1dGhuQ29udGV4dENsYXNzUmVmPnVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphYzpjbGFzc2VzOlBhc3N3b3JkPC9zYW1sOkF1dGhuQ29udGV4dENsYXNzUmVmPgogICAgICA8L3NhbWw6QXV0aG5Db250ZXh0PgogICAgPC9zYW1sOkF1dGhuU3RhdGVtZW50PgogICAgPHNhbWw6QXR0cmlidXRlU3RhdGVtZW50PgogICAgICA8c2FtbDpBdHRyaWJ1dGUgTmFtZT0idWlkIiBOYW1lRm9ybWF0PSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXR0cm5hbWUtZm9ybWF0OmJhc2ljIj4KICAgICAgICA8c2FtbDpBdHRyaWJ1dGVWYWx1ZSB4c2k6dHlwZT0ieHM6c3RyaW5nIj50ZXN0PC9zYW1sOkF0dHJpYnV0ZVZhbHVlPgogICAgICA8L3NhbWw6QXR0cmlidXRlPgogICAgICA8c2FtbDpBdHRyaWJ1dGUgTmFtZT0ibWFpbCIgTmFtZUZvcm1hdD0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOmF0dHJuYW1lLWZvcm1hdDpiYXNpYyI+CiAgICAgICAgPHNhbWw6QXR0cmlidXRlVmFsdWUgeHNpOnR5cGU9InhzOnN0cmluZyI+dGVzdEBleGFtcGxlLmNvbTwvc2FtbDpBdHRyaWJ1dGVWYWx1ZT4KICAgICAgPC9zYW1sOkF0dHJpYnV0ZT4KICAgICAgPHNhbWw6QXR0cmlidXRlIE5hbWU9ImVkdVBlcnNvbkFmZmlsaWF0aW9uIiBOYW1lRm9ybWF0PSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXR0cm5hbWUtZm9ybWF0OmJhc2ljIj4KICAgICAgICA8c2FtbDpBdHRyaWJ1dGVWYWx1ZSB4c2k6dHlwZT0ieHM6c3RyaW5nIj51c2Vyczwvc2FtbDpBdHRyaWJ1dGVWYWx1ZT4KICAgICAgICA8c2FtbDpBdHRyaWJ1dGVWYWx1ZSB4c2k6dHlwZT0ieHM6c3RyaW5nIj5leGFtcGxlcm9sZTE8L3NhbWw6QXR0cmlidXRlVmFsdWU+CiAgICAgIDwvc2FtbDpBdHRyaWJ1dGU+CiAgICA8L3NhbWw6QXR0cmlidXRlU3RhdGVtZW50PgogIDwvc2FtbDpBc3NlcnRpb24+Cjwvc2FtbHA6UmVzcG9uc2U+`
+	test.IDPMetadata = `<?xml version="1.0"?>
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="http://idp.example.com/metadata.php">
+  <IDPSSODescriptor xmlns:ds="http://www.w3.org/2000/09/xmldsig#" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>MIICajCCAdOgAwIBAgIBADANBgkqhkiG9w0BAQ0FADBSMQswCQYDVQQGEwJ1czETMBEGA1UECAwKQ2FsaWZvcm5pYTEVMBMGA1UECgwMT25lbG9naW4gSW5jMRcwFQYDVQQDDA5zcC5leGFtcGxlLmNvbTAeFw0xNDA3MTcxNDEyNTZaFw0xNTA3MTcxNDEyNTZaMFIxCzAJBgNVBAYTAnVzMRMwEQYDVQQIDApDYWxpZm9ybmlhMRUwEwYDVQQKDAxPbmVsb2dpbiBJbmMxFzAVBgNVBAMMDnNwLmV4YW1wbGUuY29tMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDZx+ON4IUoIWxgukTb1tOiX3bMYzYQiwWPUNMp+Fq82xoNogso2bykZG0yiJm5o8zv/sd6pGouayMgkx/2FSOdc36T0jGbCHuRSbtia0PEzNIRtmViMrt3AeoWBidRXmZsxCNLwgIV6dn2WpuE5Az0bHgpZnQxTKFek0BMKU/d8wIDAQABo1AwTjAdBgNVHQ4EFgQUGHxYqZYyX7cTxKVODVgZwSTdCnwwHwYDVR0jBBgwFoAUGHxYqZYyX7cTxKVODVgZwSTdCnwwDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQ0FAAOBgQByFOl+hMFICbd3DJfnp2Rgd/dqttsZG/tyhILWvErbio/DEe98mXpowhTkC04ENprOyXi7ZbUqiicF89uAGyt1oqgTUCD1VsLahqIcmrzgumNyTwLGWo17WDAa1/usDhetWAMhgzF/Cnf5ek0nK00m0YZGyc4LzgD0CROMASTWNg==</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </KeyDescriptor>
+    <NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:transient</NameIDFormat>
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://app.onelogin.com/trust/saml2/http-post/sso/503983"/>
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://app.onelogin.com/trust/saml2/http-post/sso/503983"/>
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:SOAP" Location="https://app.onelogin.com/trust/saml2/soap/sso/503983"/>
+  </IDPSSODescriptor>
+  <ContactPerson contactType="technical">
+    <SurName>Support</SurName>
+    <EmailAddress>support@onelogin.com</EmailAddress>
+  </ContactPerson>
+</EntityDescriptor>
+`
+	s := ServiceProvider{
+		Key:         test.Key,
+		Certificate: test.Certificate,
+		MetadataURL: mustParseURL("http://sp.example.com/demo1/metadata.php"),
+		AcsURL:      mustParseURL("http://sp.example.com/demo1/index.php?acs"),
+		IDPMetadata: &EntityDescriptor{},
+	}
+	err := xml.Unmarshal([]byte(test.IDPMetadata), &s.IDPMetadata)
+	assert.NoError(t, err)
+
+	req := http.Request{PostForm: url.Values{}}
+	req.PostForm.Set("SAMLResponse", SamlResponse)
+	assertion, err := s.ParseResponse(&req, []string{"ONELOGIN_4fee3b046395c4e751011e97f8900b5273d56685"})
+	if err != nil {
+		t.Logf("%s", err.(*InvalidResponseError).PrivateErr)
+	}
+	assert.NoError(t, err)
+
+	assert.Equal(t, "_ce3d2948b4cf20146dee0a0b3dd6f69b6cf86f62d7", assertion.Subject.NameID.Value)
+	assert.Equal(t, []Attribute{
+		{
+			Name:       "uid",
+			NameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+			Values: []AttributeValue{
+				{
+					Type:  "xs:string",
+					Value: "test",
+				},
+			},
+		},
+		{
+			Name:       "mail",
+			NameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+			Values: []AttributeValue{
+				{
+					Type:  "xs:string",
+					Value: "test@example.com",
+				},
+			},
+		},
+		{
+			Name:       "eduPersonAffiliation",
+			NameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+			Values: []AttributeValue{
+				{
+					Type:  "xs:string",
+					Value: "users",
+				},
+				{
+					Type:  "xs:string",
+					Value: "examplerole1",
+				},
+			},
+		},
+	}, assertion.AttributeStatements[0].Attributes)
 }
