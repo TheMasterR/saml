@@ -1,12 +1,8 @@
 package samlsp
 
 import (
-	"crypto"
-	"crypto/x509"
-	"encoding/pem"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"strings"
 
 	. "gopkg.in/check.v1"
@@ -25,38 +21,6 @@ type mockTransport func(req *http.Request) (*http.Response, error)
 
 func (mt mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return mt(req)
-}
-
-func mustParseURL(s string) url.URL {
-	rv, err := url.Parse(s)
-	if err != nil {
-		panic(err)
-	}
-	return *rv
-}
-
-func mustParsePrivateKey(pemStr string) crypto.PrivateKey {
-	b, _ := pem.Decode([]byte(pemStr))
-	if b == nil {
-		panic("cannot parse PEM")
-	}
-	k, err := x509.ParsePKCS1PrivateKey(b.Bytes)
-	if err != nil {
-		panic(err)
-	}
-	return k
-}
-
-func mustParseCertificate(pemStr string) *x509.Certificate {
-	b, _ := pem.Decode([]byte(pemStr))
-	if b == nil {
-		panic("cannot parse PEM")
-	}
-	cert, err := x509.ParseCertificate(b.Bytes)
-	if err != nil {
-		panic(err)
-	}
-	return cert
 }
 
 func (test *ParseTest) TestCanParseTestshibMetadata(c *C) {
@@ -447,8 +411,7 @@ func (test *ParseTest) TestCanParseTestshibMetadata(c *C) {
 		}, nil
 	})
 
-	u := mustParseURL("https://idp.testshib.org/idp/shibboleth")
-	_, err := New(Options{IDPMetadataURL: &u})
+	_, err := New(Options{IDPMetadataURL: "https://idp.testshib.org/idp/shibboleth"})
 	c.Assert(err, IsNil)
 }
 
@@ -494,8 +457,7 @@ MUsphIQXHXtrx4Z3qRgE/uZ8z98LA35XfA==</ds:X509Certificate>
 		}, nil
 	})
 
-	u := mustParseURL("https://accounts.google.com/o/saml2?idpid=123456789")
-	_, err := New(Options{IDPMetadataURL: &u})
+	_, err := New(Options{IDPMetadataURL: "https://accounts.google.com/o/saml2?idpid=123456789"})
 	c.Assert(err, IsNil)
 }
 
@@ -571,7 +533,6 @@ MUsphIQXHXtrx4Z3qRgE/uZ8z98LA35XfA==
 		}, nil
 	})
 
-	u := mustParseURL("https://ipa.example.com/idp/saml2/metadata")
-	_, err := New(Options{IDPMetadataURL: &u})
+	_, err := New(Options{IDPMetadataURL: "https://ipa.example.com/idp/saml2/metadata"})
 	c.Assert(err, IsNil)
 }

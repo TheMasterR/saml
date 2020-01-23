@@ -27,7 +27,7 @@ Each service provider must have an self-signed X.509 key pair established. You c
 
     openssl req -x509 -newkey rsa:2048 -keyout myservice.key -out myservice.cert -days 365 -nodes -subj "/CN=myservice.example.com"
 
-We will use `samlsp.Middleware` to wrap the endpoint we want to protect. Middleware provides both an `http.Handler` to serve the SAML specific URLs **and** a set of wrappers to require the user to be logged in. We also provide the URL where the service provider can fetch the metadata from the IDP at startup. In our case, we'll use [testshib.org](https://www.testshib.org/), an identity provider designed for testing.
+We will use `samlsp.Middleware` to wrap the endpoint we want to protect. Middleware provides both an `http.Handler` to serve the SAML specific URLs **and** a set of wrappers to require the user to be logged in. We also provide the URL where the service provider can fetch the metadata from the IDP at startup. In our case, we'll use [testshib.org](testshib.org), an identity provider designed for testing.
 
     package main
 
@@ -44,30 +44,13 @@ We will use `samlsp.Middleware` to wrap the endpoint we want to protect. Middlew
     }
 
     func main() {
-        keyPair, err := tls.LoadX509KeyPair("myservice.cert", "myservice.key")
-        if err != nil {
-            panic(err) // TODO handle error
-        }
-        keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
-        if err != nil {
-            panic(err) // TODO handle error
-        }
-
-        idpMetadataURL, err := url.Parse("https://www.testshib.org/metadata/testshib-providers.xml")
-        if err != nil {
-            panic(err) // TODO handle error
-        }
-
-        rootURL, err := url.Parse("http://localhost:8000")
-        if err != nil {
-            panic(err) // TODO handle error
-        }
-
+        key, _ := ioutil.ReadFile("myservice.key")
+        cert, _ := ioutil.ReadFile("myservice.cert")
         samlSP, _ := samlsp.New(samlsp.Options{
-            URL:            *rootURL,
-            Key:            kp.PrivateKey.(*rsa.PrivateKey),
-            Certificate:    kp.Leaf,
-            IDPMetadataURL: idpMetadataURL,
+            IDPMetadataURL: "https://www.testshib.org/metadata/testshib-providers.xml",
+            URL:            "http://localhost:8000",
+            Key:            string(key),
+            Certificate:    string(cert),
         })
         app := http.HandlerFunc(hello)
         http.Handle("/hello", samlSP.RequireAccount(app))
@@ -76,12 +59,11 @@ We will use `samlsp.Middleware` to wrap the endpoint we want to protect. Middlew
     }
 
 
-Next we'll have to register our service provider with the identiy provider to establish trust from the service provider to the IDP. For [testshib.org](https://www.testshib.org/), you can do something like:
+Next we'll have to register our service provider with the identiy provider to establish trust from the service provider to the IDP. For [testshib.org](testshib.org), you can do something like:
 
     mdpath=saml-test-$USER-$HOST.xml
     curl localhost:8000/saml/metadata > $mdpath
-
-Naviate to https://www.testshib.org/register.html and upload the file you fetched. 
+    curl -i -F userfile=@$mdpath https://www.testshib.org/procupload.php
 
 Now you should be able to authenticate. The flow should look like this:
 
@@ -105,7 +87,7 @@ Please see `examples/idp/` for a substantially complete example of how to use th
 
 The SAML standard is huge and complex with many dark corners and strange, unused features. This package implements the most commonly used subset of these features required to provide a single sign on experience. The package supports at least the subset of SAML known as [interoperable SAML](http://saml2int.org).
 
-This package supports the **Web SSO** profile. Message flows from the service provider to the IDP are supported using the **HTTP Redirect** binding and the **HTTP POST** binding. Message flows from the IDP to the service provider are supported via the **HTTP POST** binding.
+This package supports the **Web SSO** profile. Message flows from the service provider to the IDP are supported using the **HTTP Redirect** binding and the **HTTP POST** binding. Message flows fromthe IDP to the service provider are supported vai the **HTTP POST** binding.
 
 The package supports signed and encrypted SAML assertions. It does not support signed or encrypted requests.
 
@@ -127,7 +109,7 @@ The SAML specification is a collection of PDFs (sadly):
 
 - [SAMLConformance](http://docs.oasis-open.org/security/saml/v2.0/saml-conformance-2.0-os.pdf) includes a support matrix for various parts of the protocol.
 
-[TestShib](https://www.testshib.org/) is a testing ground for SAML service and identity providers.
+[TestShib](http://www.testshib.org/) is a testing ground for SAML service and identity providers.
 
 ## Security Issues
 

@@ -3,6 +3,7 @@ package samlidp
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/zenazn/goji/web"
@@ -90,7 +91,7 @@ func (s *Server) HandleIDPInitiated(c web.C, w http.ResponseWriter, r *http.Requ
 	shortcutName := c.URLParams["shortcut"]
 	shortcut := Shortcut{}
 	if err := s.Store.Get(fmt.Sprintf("/shortcuts/%s", shortcutName), &shortcut); err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}

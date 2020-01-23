@@ -3,25 +3,20 @@ package saml
 import (
 	"bytes"
 	"compress/flate"
-	"crypto"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"text/template"
 	"time"
 
-	"github.com/beevik/etree"
-	"github.com/crewjam/saml/logger"
-	"github.com/crewjam/saml/xmlenc"
-	dsig "github.com/russellhaering/goxmldsig"
+	"github.com/crewjam/go-xmlsec"
 )
 
 // Session represents a user session. It is returned by the
@@ -53,16 +48,6 @@ type SessionProvider interface {
 	GetSession(w http.ResponseWriter, r *http.Request, req *IdpAuthnRequest) *Session
 }
 
-// ServiceProviderProvider is an interface used by IdentityProvider to look up
-// service provider metadata for a request.
-type ServiceProviderProvider interface {
-	// GetServiceProvider returns the Service Provider metadata for the
-	// service provider ID, which is typically the service provider's
-	// metadata URL. If an appropriate service provider cannot be found then
-	// the returned error must be os.ErrNotExist.
-	GetServiceProvider(r *http.Request, serviceProviderID string) (*Metadata, error)
-}
-
 // IdentityProvider implements the SAML Identity Provider role (IDP).
 //
 // An identity provider receives SAML assertion requests and responds
@@ -71,28 +56,31 @@ type ServiceProviderProvider interface {
 // You must provide a keypair that is used to
 // sign assertions.
 //
-// You must provide an implementation of ServiceProviderProvider which
-// returns
+// For each service provider that is able to use this
+// IDP you must add their metadata to the ServiceProviders map.
 //
 // You must provide an implementation of the SessionProvider which
 // handles the actual authentication (i.e. prompting for a username
 // and password).
 type IdentityProvider struct {
-	Key                     crypto.PrivateKey
-	Logger                  logger.Interface
-	Certificate             *x509.Certificate
-	MetadataURL             url.URL
-	SSOURL                  url.URL
-	ServiceProviderProvider ServiceProviderProvider
-	SessionProvider         SessionProvider
+	Key              string
+	Certificate      string
+	MetadataURL      string
+	SSOURL           string
+	ServiceProviders map[string]*Metadata
+	SessionProvider  SessionProvider
 }
 
 // Metadata returns the metadata structure for this identity provider.
 func (idp *IdentityProvider) Metadata() *Metadata {
-	certStr := base64.StdEncoding.EncodeToString(idp.Certificate.Raw)
+	cert, _ := pem.Decode([]byte(idp.Certificate))
+	if cert == nil {
+		panic("invalid IDP certificate")
+	}
+	certStr := base64.StdEncoding.EncodeToString(cert.Bytes)
 
 	return &Metadata{
-		EntityID:      idp.MetadataURL.String(),
+		EntityID:      idp.MetadataURL,
 		ValidUntil:    TimeNow().Add(DefaultValidDuration),
 		CacheDuration: DefaultValidDuration,
 		IDPSSODescriptor: &IDPSSODescriptor{
@@ -123,11 +111,11 @@ func (idp *IdentityProvider) Metadata() *Metadata {
 			SingleSignOnService: []Endpoint{
 				{
 					Binding:  HTTPRedirectBinding,
-					Location: idp.SSOURL.String(),
+					Location: idp.SSOURL,
 				},
 				{
 					Binding:  HTTPPostBinding,
-					Location: idp.SSOURL.String(),
+					Location: idp.SSOURL,
 				},
 			},
 		},
@@ -138,8 +126,18 @@ func (idp *IdentityProvider) Metadata() *Metadata {
 // URLs
 func (idp *IdentityProvider) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(idp.MetadataURL.Path, idp.ServeMetadata)
-	mux.HandleFunc(idp.SSOURL.Path, idp.ServeSSO)
+
+	metadataURL, err := url.Parse(idp.MetadataURL)
+	if err != nil {
+		panic(err)
+	}
+	mux.HandleFunc(metadataURL.Path, idp.ServeMetadata)
+
+	ssoURL, err := url.Parse(idp.SSOURL)
+	if err != nil {
+		panic(err)
+	}
+	mux.HandleFunc(ssoURL.Path, idp.ServeSSO)
 	return mux
 }
 
@@ -170,13 +168,13 @@ func (idp *IdentityProvider) ServeMetadata(w http.ResponseWriter, r *http.Reques
 func (idp *IdentityProvider) ServeSSO(w http.ResponseWriter, r *http.Request) {
 	req, err := NewIdpAuthnRequest(idp, r)
 	if err != nil {
-		idp.Logger.Printf("failed to parse request: %s", err)
+		log.Printf("failed to parse request: %s", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	if err := req.Validate(); err != nil {
-		idp.Logger.Printf("failed to validate request: %s", err)
+		log.Printf("failed to validate request: %s", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
@@ -191,12 +189,12 @@ func (idp *IdentityProvider) ServeSSO(w http.ResponseWriter, r *http.Request) {
 
 	// we have a valid session and must make a SAML assertion
 	if err := req.MakeAssertion(session); err != nil {
-		idp.Logger.Printf("failed to make assertion: %s", err)
+		log.Printf("failed to make assertion: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	if err := req.WriteResponse(w); err != nil {
-		idp.Logger.Printf("failed to write response: %s", err)
+		log.Printf("failed to write response: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -217,15 +215,11 @@ func (idp *IdentityProvider) ServeIDPInitiated(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var err error
-	req.ServiceProviderMetadata, err = idp.ServiceProviderProvider.GetServiceProvider(r, serviceProviderID)
-	if err == os.ErrNotExist {
-		idp.Logger.Printf("cannot find service provider: %s", serviceProviderID)
+	var ok bool
+	req.ServiceProviderMetadata, ok = idp.ServiceProviders[serviceProviderID]
+	if !ok {
+		log.Printf("cannot find service provider: %s", serviceProviderID)
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-		return
-	} else if err != nil {
-		idp.Logger.Printf("cannot find service provider %s: %v", serviceProviderID, err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -235,12 +229,12 @@ func (idp *IdentityProvider) ServeIDPInitiated(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := req.MakeAssertion(session); err != nil {
-		idp.Logger.Printf("failed to make assertion: %s", err)
+		log.Printf("failed to make assertion: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	if err := req.WriteResponse(w); err != nil {
-		idp.Logger.Printf("failed to write response: %s", err)
+		log.Printf("failed to write response: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -305,9 +299,9 @@ func (req *IdpAuthnRequest) Validate() error {
 
 	// TODO(ross): is this supposed to be the metdata URL? or the target URL?
 	//   i.e. should idp.SSOURL actually be idp.Metadata().EntityID?
-	if req.Request.Destination != req.IDP.SSOURL.String() {
+	if req.Request.Destination != req.IDP.SSOURL {
 		return fmt.Errorf("expected destination to be %q, not %q",
-			req.IDP.SSOURL.String(), req.Request.Destination)
+			req.IDP.SSOURL, req.Request.Destination)
 	}
 	if req.Request.IssueInstant.Add(MaxIssueDelay).Before(TimeNow()) {
 		return fmt.Errorf("request expired at %s",
@@ -318,12 +312,10 @@ func (req *IdpAuthnRequest) Validate() error {
 	}
 
 	// find the service provider
-	serviceProviderID := req.Request.Issuer.Value
-	serviceProvider, err := req.IDP.ServiceProviderProvider.GetServiceProvider(req.HTTPRequest, serviceProviderID)
-	if err == os.ErrNotExist {
-		return fmt.Errorf("cannot handle request from unknown service provider %s", serviceProviderID)
-	} else if err != nil {
-		return fmt.Errorf("cannot find service provider %s: %v", serviceProviderID, err)
+	serviceProvider, serviceProviderFound := req.IDP.ServiceProviders[req.Request.Issuer.Value]
+	if !serviceProviderFound {
+		return fmt.Errorf("cannot handle request from unknown service provider %s",
+			req.Request.Issuer.Value)
 	}
 	req.ServiceProviderMetadata = serviceProvider
 
@@ -346,7 +338,7 @@ func (req *IdpAuthnRequest) Validate() error {
 // MakeAssertion produces a SAML assertion for the
 // given request and assigns it to req.Assertion.
 func (req *IdpAuthnRequest) MakeAssertion(session *Session) error {
-
+	signatureTemplate := xmlsec.DefaultSignature([]byte(req.IDP.Certificate))
 	attributes := []Attribute{}
 	if session.UserName != "" {
 		attributes = append(attributes, Attribute{
@@ -430,6 +422,7 @@ func (req *IdpAuthnRequest) MakeAssertion(session *Session) error {
 			Format: "XXX",
 			Value:  req.IDP.Metadata().EntityID,
 		},
+		Signature: &signatureTemplate,
 		Subject: &Subject{
 			NameID: &NameID{
 				Format:          "urn:oasis:names:tc:SAML:2.0:nameid-format:transient",
@@ -477,80 +470,56 @@ func (req *IdpAuthnRequest) MakeAssertion(session *Session) error {
 // MarshalAssertion sets `AssertionBuffer` to a signed, encrypted
 // version of `Assertion`.
 func (req *IdpAuthnRequest) MarshalAssertion() error {
-	keyPair := tls.Certificate{
-		Certificate: [][]byte{req.IDP.Certificate.Raw},
-		PrivateKey:  req.IDP.Key,
-		Leaf:        req.IDP.Certificate,
-	}
-	keyStore := dsig.TLSCertKeyStore(keyPair)
-
-	signingContext := dsig.NewDefaultSigningContext(keyStore)
-	if err := signingContext.SetSignatureMethod(dsig.RSASHA1SignatureMethod); err != nil {
-		return err
-	}
-
-	assertionEl, err := marshalEtreeHack(req.Assertion)
+	buf, err := xml.Marshal(req.Assertion)
 	if err != nil {
 		return err
 	}
 
-	signedAssertionEl, err := signingContext.SignEnveloped(assertionEl)
+	buf, err = xmlsec.Sign([]byte(req.IDP.Key),
+		buf, xmlsec.SignatureOptions{})
 	if err != nil {
 		return err
 	}
 
-	var signedAssertionBuf []byte
-	{
-		doc := etree.NewDocument()
-		doc.SetRoot(signedAssertionEl)
-		signedAssertionBuf, err = doc.WriteToBytes()
-		if err != nil {
-			return err
-		}
-	}
-
-	encryptor := xmlenc.OAEP()
-	encryptor.BlockCipher = xmlenc.AES128CBC
-	encryptor.DigestMethod = &xmlenc.SHA1
-	certBuf, err := getSPEncryptionCert(req.ServiceProviderMetadata)
+	buf, err = xmlsec.Encrypt(getSPEncryptionCert(req.ServiceProviderMetadata),
+		buf, xmlsec.EncryptOptions{})
 	if err != nil {
 		return err
 	}
-	encryptedDataEl, err := encryptor.Encrypt(certBuf, signedAssertionBuf)
-	if err != nil {
-		return err
-	}
-	encryptedDataEl.CreateAttr("Type", "http://www.w3.org/2001/04/xmlenc#Element")
 
-	{
-		encryptedAssertionEl := etree.NewElement("saml2:EncryptedAssertion")
-		encryptedAssertionEl.CreateAttr("xmlns:saml2", "urn:oasis:names:tc:SAML:2.0:protocol")
-		encryptedAssertionEl.AddChild(encryptedDataEl)
-		doc := etree.NewDocument()
-		doc.SetRoot(encryptedAssertionEl)
-		req.AssertionBuffer, err = doc.WriteToBytes()
-		if err != nil {
-			return err
-		}
-	}
+	req.AssertionBuffer = buf
 	return nil
 }
 
-// marshalEtreeHack returns an etree.Element for the value v.
-//
-// This is a hack -- it first users xml.Marshal and then loads the
-// resulting buffer into an etree.
-func marshalEtreeHack(v interface{}) (*etree.Element, error) {
-	buf, err := xml.Marshal(v)
-	if err != nil {
-		return nil, err
+// MakeResponse creates and assigns a new SAML response in Response. `Assertion` must
+// be non-nill. If MarshalAssertion() has not been called, this function calls it for
+// you.
+func (req *IdpAuthnRequest) MakeResponse() error {
+	if req.AssertionBuffer == nil {
+		if err := req.MarshalAssertion(); err != nil {
+			return err
+		}
 	}
-
-	doc := etree.NewDocument()
-	if err := doc.ReadFromBytes(buf); err != nil {
-		return nil, err
+	req.Response = &Response{
+		Destination:  req.ACSEndpoint.Location,
+		ID:           fmt.Sprintf("id-%x", randomBytes(20)),
+		InResponseTo: req.Request.ID,
+		IssueInstant: TimeNow(),
+		Version:      "2.0",
+		Issuer: &Issuer{
+			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
+			Value:  req.IDP.MetadataURL,
+		},
+		Status: &Status{
+			StatusCode: StatusCode{
+				Value: StatusSuccess,
+			},
+		},
+		EncryptedAssertion: &EncryptedAssertion{
+			EncryptedData: req.AssertionBuffer,
+		},
 	}
-	return doc.Root(), nil
+	return nil
 }
 
 // WriteResponse writes the `Response` to the http.ResponseWriter. If
@@ -605,7 +574,7 @@ func (req *IdpAuthnRequest) WriteResponse(w http.ResponseWriter) error {
 
 // getSPEncryptionCert returns the certificate which we can use to encrypt things
 // to the SP in PEM format, or nil if no such certificate is found.
-func getSPEncryptionCert(sp *Metadata) ([]byte, error) {
+func getSPEncryptionCert(sp *Metadata) []byte {
 	cert := ""
 	for _, keyDescriptor := range sp.SPSSODescriptor.KeyDescriptor {
 		if keyDescriptor.Use == "encryption" {
@@ -626,58 +595,14 @@ func getSPEncryptionCert(sp *Metadata) ([]byte, error) {
 	}
 
 	if cert == "" {
-		return nil, fmt.Errorf("cannot find a certificate for encryption in the service provider SSO descriptor")
+		return nil
 	}
 
 	// cleanup whitespace and re-encode a PEM
-	cert = regexp.MustCompile(`\s+`).ReplaceAllString(cert, "")
-	certBytes, err := base64.StdEncoding.DecodeString(cert)
-	if err != nil {
-		return nil, err
-	}
-	return certBytes, nil
-}
-
-// unmarshalEtreeHack parses `el` and sets values in the structure `v`.
-//
-// This is a hack -- it first serializes the element, then uses xml.Unmarshal.
-func unmarshalEtreeHack(el *etree.Element, v interface{}) error {
-	doc := etree.NewDocument()
-	doc.SetRoot(el)
-	buf, err := doc.WriteToBytes()
-	if err != nil {
-		return err
-	}
-	return xml.Unmarshal(buf, v)
-}
-
-// MakeResponse creates and assigns a new SAML response in Response. `Assertion` must
-// be non-nill. If MarshalAssertion() has not been called, this function calls it for
-// you.
-func (req *IdpAuthnRequest) MakeResponse() error {
-	if req.AssertionBuffer == nil {
-		if err := req.MarshalAssertion(); err != nil {
-			return err
-		}
-	}
-	req.Response = &Response{
-		Destination:  req.ACSEndpoint.Location,
-		ID:           fmt.Sprintf("id-%x", randomBytes(20)),
-		InResponseTo: req.Request.ID,
-		IssueInstant: TimeNow(),
-		Version:      "2.0",
-		Issuer: &Issuer{
-			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
-			Value:  req.IDP.MetadataURL.String(),
-		},
-		Status: &Status{
-			StatusCode: StatusCode{
-				Value: StatusSuccess,
-			},
-		},
-		EncryptedAssertion: &EncryptedAssertion{
-			EncryptedData: req.AssertionBuffer,
-		},
-	}
-	return nil
+	cert = regexp.MustCompile("\\s+").ReplaceAllString(cert, "")
+	certBytes, _ := base64.StdEncoding.DecodeString(cert)
+	certBytes = pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certBytes})
+	return certBytes
 }

@@ -3,49 +3,34 @@
 package samlsp
 
 import (
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/xml"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/crewjam/saml"
-	"github.com/crewjam/saml/logger"
 )
 
 // Options represents the parameters for creating a new middleware
 type Options struct {
-	URL               url.URL
-	Key               *rsa.PrivateKey
-	Logger            logger.Interface
-	Certificate       *x509.Certificate
+	URL               string
+	Key               string
+	Certificate       string
 	AllowIDPInitiated bool
 	IDPMetadata       *saml.Metadata
-	IDPMetadataURL    *url.URL
+	IDPMetadataURL    string
 }
 
 // New creates a new Middleware
 func New(opts Options) (*Middleware, error) {
-
-	metadataURL := opts.URL
-	metadataURL.Path = metadataURL.Path + "/saml/metadata"
-	acsURL := opts.URL
-	acsURL.Path = acsURL.Path + "/saml/acs"
-	logr := opts.Logger
-	if logr == nil {
-		logr = logger.DefaultLogger
-	}
-
 	m := &Middleware{
 		ServiceProvider: saml.ServiceProvider{
 			Key:         opts.Key,
-			Logger:      logr,
 			Certificate: opts.Certificate,
-			MetadataURL: metadataURL,
-			AcsURL:      acsURL,
+			MetadataURL: opts.URL + "/saml/metadata",
+			AcsURL:      opts.URL + "/saml/acs",
 			IDPMetadata: opts.IDPMetadata,
 		},
 		AllowIDPInitiated: opts.AllowIDPInitiated,
@@ -54,12 +39,12 @@ func New(opts Options) (*Middleware, error) {
 	}
 
 	// fetch the IDP metadata if needed.
-	if opts.IDPMetadataURL == nil {
+	if opts.IDPMetadataURL == "" {
 		return m, nil
 	}
 
 	c := http.DefaultClient
-	req, err := http.NewRequest("GET", opts.IDPMetadataURL.String(), nil)
+	req, err := http.NewRequest("GET", opts.IDPMetadataURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +66,7 @@ func New(opts Options) (*Middleware, error) {
 			if i > 10 {
 				return nil, err
 			}
-			logr.Printf("ERROR: %s: %s (will retry)", opts.IDPMetadataURL, err)
+			log.Printf("ERROR: %s: %s (will retry)", opts.IDPMetadataURL, err)
 			time.Sleep(5 * time.Second)
 			continue
 		}

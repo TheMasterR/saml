@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"log"
 	"net/http"
-	"os"
 
 	"github.com/crewjam/saml"
 	"github.com/zenazn/goji/web"
@@ -20,26 +20,12 @@ type Service struct {
 	Metadata saml.Metadata
 }
 
-// GetServiceProvider returns the Service Provider metadata for the
-// service provider ID, which is typically the service provider's
-// metadata URL. If an appropriate service provider cannot be found then
-// the returned error must be os.ErrNotExist.
-func (s *Server) GetServiceProvider(r *http.Request, serviceProviderID string) (*saml.Metadata, error) {
-	s.idpConfigMu.RLock()
-	defer s.idpConfigMu.RUnlock()
-	rv, ok := s.serviceProviders[serviceProviderID]
-	if !ok {
-		return nil, os.ErrNotExist
-	}
-	return rv, nil
-}
-
 // HandleListServices handles the `GET /services/` request and responds with a JSON formatted list
 // of service names.
 func (s *Server) HandleListServices(c web.C, w http.ResponseWriter, r *http.Request) {
 	services, err := s.Store.List("/services/")
 	if err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -55,7 +41,7 @@ func (s *Server) HandleGetService(c web.C, w http.ResponseWriter, r *http.Reques
 	service := Service{}
 	err := s.Store.Get(fmt.Sprintf("/services/%s", c.URLParams["id"]), &service)
 	if err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -67,20 +53,20 @@ func (s *Server) HandleGetService(c web.C, w http.ResponseWriter, r *http.Reques
 func (s *Server) HandlePutService(c web.C, w http.ResponseWriter, r *http.Request) {
 	service := Service{}
 	if err := xml.NewDecoder(r.Body).Decode(&service.Metadata); err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	err := s.Store.Put(fmt.Sprintf("/services/%s", c.URLParams["id"]), &service)
 	if err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	s.idpConfigMu.Lock()
-	s.serviceProviders[service.Metadata.EntityID] = &service.Metadata
+	s.IDP.ServiceProviders[service.Metadata.EntityID] = &service.Metadata
 	s.idpConfigMu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
@@ -91,19 +77,19 @@ func (s *Server) HandleDeleteService(c web.C, w http.ResponseWriter, r *http.Req
 	service := Service{}
 	err := s.Store.Get(fmt.Sprintf("/services/%s", c.URLParams["id"]), &service)
 	if err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	if err := s.Store.Delete(fmt.Sprintf("/services/%s", c.URLParams["id"])); err != nil {
-		s.logger.Printf("ERROR: %s", err)
+		log.Printf("ERROR: %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	s.idpConfigMu.Lock()
-	delete(s.serviceProviders, service.Metadata.EntityID)
+	delete(s.IDP.ServiceProviders, service.Metadata.EntityID)
 	s.idpConfigMu.Unlock()
 
 	w.WriteHeader(http.StatusNoContent)
@@ -123,7 +109,7 @@ func (s *Server) initializeServices() error {
 		}
 
 		s.idpConfigMu.Lock()
-		s.serviceProviders[service.Metadata.EntityID] = &service.Metadata
+		s.IDP.ServiceProviders[service.Metadata.EntityID] = &service.Metadata
 		s.idpConfigMu.Unlock()
 	}
 	return nil
