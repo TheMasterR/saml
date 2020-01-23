@@ -11,8 +11,9 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/crewjam/saml"
 	"github.com/zenazn/goji/web"
+
+	"github.com/crewjam/saml"
 )
 
 var sessionMaxAge = time.Hour
@@ -47,16 +48,18 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request, req *saml.Id
 		}
 
 		session := &saml.Session{
-			ID:             base64.StdEncoding.EncodeToString(randomBytes(32)),
-			CreateTime:     saml.TimeNow(),
-			ExpireTime:     saml.TimeNow().Add(sessionMaxAge),
-			Index:          hex.EncodeToString(randomBytes(32)),
-			UserName:       user.Name,
-			Groups:         user.Groups[:],
-			UserEmail:      user.Email,
-			UserCommonName: user.CommonName,
-			UserSurname:    user.Surname,
-			UserGivenName:  user.GivenName,
+			ID:                    base64.StdEncoding.EncodeToString(randomBytes(32)),
+			NameID:                user.Email,
+			CreateTime:            saml.TimeNow(),
+			ExpireTime:            saml.TimeNow().Add(sessionMaxAge),
+			Index:                 hex.EncodeToString(randomBytes(32)),
+			UserName:              user.Name,
+			Groups:                user.Groups[:],
+			UserEmail:             user.Email,
+			UserCommonName:        user.CommonName,
+			UserSurname:           user.Surname,
+			UserGivenName:         user.GivenName,
+			UserScopedAffiliation: user.ScopedAffiliation,
 		}
 		if err := s.Store.Put(fmt.Sprintf("/sessions/%s", session.ID), &session); err != nil {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -67,7 +70,8 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request, req *saml.Id
 			Name:     "session",
 			Value:    session.ID,
 			MaxAge:   int(sessionMaxAge.Seconds()),
-			HttpOnly: false,
+			HttpOnly: true,
+			Secure:   r.URL.Scheme == "https",
 			Path:     "/",
 		})
 		return session
@@ -117,7 +121,7 @@ func (s *Server) sendLoginForm(w http.ResponseWriter, r *http.Request, req *saml
 		RelayState  string
 	}{
 		Toast:       toast,
-		URL:         req.IDP.SSOURL,
+		URL:         req.IDP.SSOURL.String(),
 		SAMLRequest: base64.StdEncoding.EncodeToString(req.RequestBuffer),
 		RelayState:  req.RelayState,
 	}

@@ -3,18 +3,24 @@
 package samlidp
 
 import (
+	"crypto"
+	"crypto/x509"
 	"net/http"
+	"net/url"
 	"sync"
 
-	"github.com/crewjam/saml"
 	"github.com/zenazn/goji/web"
+
+	"github.com/crewjam/saml"
+	"github.com/crewjam/saml/logger"
 )
 
 // Options represent the parameters to New() for creating a new IDP server
 type Options struct {
-	URL         string
-	Key         string
-	Certificate string
+	URL         url.URL
+	Key         crypto.PrivateKey
+	Logger      logger.Interface
+	Certificate *x509.Certificate
 	Store       Store
 }
 
@@ -30,24 +36,39 @@ type Options struct {
 //     /shortcuts    - RESTful interface to Shortcut objects
 type Server struct {
 	http.Handler
-	idpConfigMu sync.RWMutex          // protects calls into the IDP
-	IDP         saml.IdentityProvider // the underlying IDP
-	Store       Store                 // the data store
+	idpConfigMu      sync.RWMutex // protects calls into the IDP
+	logger           logger.Interface
+	serviceProviders map[string]*saml.EntityDescriptor
+	IDP              saml.IdentityProvider // the underlying IDP
+	Store            Store                 // the data store
 }
 
 // New returns a new Server
 func New(opts Options) (*Server, error) {
-	s := &Server{
-		IDP: saml.IdentityProvider{
-			Key:              opts.Key,
-			Certificate:      opts.Certificate,
-			MetadataURL:      opts.URL + "/metadata",
-			SSOURL:           opts.URL + "/sso",
-			ServiceProviders: map[string]*saml.Metadata{},
-		},
-		Store: opts.Store,
+	metadataURL := opts.URL
+	metadataURL.Path = metadataURL.Path + "/metadata"
+	ssoURL := opts.URL
+	ssoURL.Path = ssoURL.Path + "/sso"
+	logr := opts.Logger
+	if logr == nil {
+		logr = logger.DefaultLogger
 	}
+
+	s := &Server{
+		serviceProviders: map[string]*saml.EntityDescriptor{},
+		IDP: saml.IdentityProvider{
+			Key:         opts.Key,
+			Logger:      logr,
+			Certificate: opts.Certificate,
+			MetadataURL: metadataURL,
+			SSOURL:      ssoURL,
+		},
+		logger: logr,
+		Store:  opts.Store,
+	}
+
 	s.IDP.SessionProvider = s
+	s.IDP.ServiceProviderProvider = s
 
 	if err := s.initializeServices(); err != nil {
 		return nil, err
