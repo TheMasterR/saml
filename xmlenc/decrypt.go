@@ -79,18 +79,20 @@ func getCiphertext(encryptedKey *etree.Element) ([]byte, error) {
 	return ciphertext, nil
 }
 
-func validateRSAKeyIfPresent(key interface{}, encryptedKey *etree.Element) (*rsa.PrivateKey, error) {
+func validateRSAKey(key interface{}, encryptedKey *etree.Element) (*rsa.PrivateKey, error) {
 	rsaKey, ok := key.(*rsa.PrivateKey)
 	if !ok {
 		return nil, errors.New("expected key to be a *rsa.PrivateKey")
 	}
 
 	// extract and verify that the public key matches the certificate
-	// this section is included to either let the service know up front
-	// if the key will work, or let the service provider know which key
-	// to use to decrypt the message. Either way, verification is not
-	// security-critical.
-	if el := encryptedKey.FindElement("./KeyInfo/X509Data/X509Certificate"); el != nil {
+	// TODO(ross): I'm not sure why this is needed, but perhaps the certificate is
+	//   included in case there is more than one key or something?
+	{
+		el := encryptedKey.FindElement("./KeyInfo/X509Data/X509Certificate")
+		if el == nil {
+			return nil, ErrCannotFindRequiredElement("X509Certificate")
+		}
 		certPEMbuf := el.Text()
 		certPEMbuf = "-----BEGIN CERTIFICATE-----\n" + certPEMbuf + "\n-----END CERTIFICATE-----\n"
 		certPEM, _ := pem.Decode([]byte(certPEMbuf))
@@ -108,8 +110,6 @@ func validateRSAKeyIfPresent(key interface{}, encryptedKey *etree.Element) (*rsa
 		if rsaKey.N.Cmp(pubKey.N) != 0 || rsaKey.E != pubKey.E {
 			return nil, fmt.Errorf("certificate does not match provided key")
 		}
-	} else if el = encryptedKey.FindElement("./KeyInfo/X509Data/X509IssuerSerial"); el != nil {
-		// TODO: determine how to validate the issuer serial information
 	}
 	return rsaKey, nil
 }

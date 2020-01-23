@@ -8,10 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"testing"
 
-	"github.com/stretchr/testify/assert"
+	. "gopkg.in/check.v1"
 )
+
+var _ = Suite(&ParseTest{})
+
+type ParseTest struct {
+}
+
+func (test *ParseTest) SetUpTest(c *C) {
+
+}
 
 type mockTransport func(req *http.Request) (*http.Response, error)
 
@@ -51,7 +59,7 @@ func mustParseCertificate(pemStr string) *x509.Certificate {
 	return cert
 }
 
-func TestCanParseTestshibMetadata(t *testing.T) {
+func (test *ParseTest) TestCanParseTestshibMetadata(c *C) {
 	http.DefaultTransport = mockTransport(func(req *http.Request) (*http.Response, error) {
 		responseBody := `<EntitiesDescriptor Name="urn:mace:shibboleth:testshib:two"
     xmlns="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
@@ -440,14 +448,11 @@ func TestCanParseTestshibMetadata(t *testing.T) {
 	})
 
 	u := mustParseURL("https://idp.testshib.org/idp/shibboleth")
-	m, err := New(Options{IDPMetadataURL: &u})
-	assert.NoError(t, err)
-	assert.NotNil(t, m)
-	assert.NotNil(t, m.ServiceProvider.IDPMetadata)
-	assert.Equal(t, "https://idp.testshib.org/idp/shibboleth", m.ServiceProvider.IDPMetadata.EntityID)
+	_, err := New(Options{IDPMetadataURL: &u})
+	c.Assert(err, IsNil)
 }
 
-func TestCanParseGoogleMetadata(t *testing.T) {
+func (test *ParseTest) TestCanParseGoogleMetadata(c *C) {
 	http.DefaultTransport = mockTransport(func(req *http.Request) (*http.Response, error) {
 		responseBody := `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://accounts.google.com/o/saml2?idpid=123456789" validUntil="2021-01-03T16:17:49.000Z">
@@ -491,10 +496,10 @@ MUsphIQXHXtrx4Z3qRgE/uZ8z98LA35XfA==</ds:X509Certificate>
 
 	u := mustParseURL("https://accounts.google.com/o/saml2?idpid=123456789")
 	_, err := New(Options{IDPMetadataURL: &u})
-	assert.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestCanParseFreeIPAMetadata(t *testing.T) {
+func (test *ParseTest) TestCanParseFreeIPAMetadata(c *C) {
 	http.DefaultTransport = mockTransport(func(req *http.Request) (*http.Response, error) {
 		responseBody := `<?xml version='1.0' encoding='UTF-8'?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" validUntil="2021-10-11T12:03:21.537380" entityID="https://ipa.example.com/idp/saml2/metadata">
@@ -568,5 +573,5 @@ MUsphIQXHXtrx4Z3qRgE/uZ8z98LA35XfA==
 
 	u := mustParseURL("https://ipa.example.com/idp/saml2/metadata")
 	_, err := New(Options{IDPMetadataURL: &u})
-	assert.NoError(t, err)
+	c.Assert(err, IsNil)
 }

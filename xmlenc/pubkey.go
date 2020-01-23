@@ -30,19 +30,23 @@ func (e RSA) Algorithm() string {
 // Encrypt implements encrypter. certificate must be a []byte containing the ASN.1 bytes
 // of certificate containing an RSA public key.
 func (e RSA) Encrypt(certificate interface{}, plaintext []byte) (*etree.Element, error) {
-	cert, ok := certificate.(*x509.Certificate)
+	certBuf, ok := certificate.([]byte)
 	if !ok {
-		return nil, ErrIncorrectKeyType("*x.509 certificate")
+		return nil, ErrIncorrectKeyType("certificate must be a []byte")
 	}
 
+	cert, err := x509.ParseCertificate(certBuf)
+	if err != nil {
+		return nil, ErrIncorrectKeyType("certificate must be ASN.1 bytes of an x.509 certificate")
+	}
 	pubKey, ok := cert.PublicKey.(*rsa.PublicKey)
 	if !ok {
-		return nil, ErrIncorrectKeyType("x.509 certificate with an RSA public key")
+		return nil, ErrIncorrectKeyType("certificate must be ASN.1 bytes of an x.509 certificate with an RSA public key")
 	}
 
 	// generate a key
 	key := make([]byte, e.BlockCipher.KeySize())
-	if _, err := RandReader.Read(key); err != nil {
+	if _, err = RandReader.Read(key); err != nil {
 		return nil, err
 	}
 
@@ -52,7 +56,7 @@ func (e RSA) Encrypt(certificate interface{}, plaintext []byte) (*etree.Element,
 	encryptedKey := keyInfoEl.CreateElement("xenc:EncryptedKey")
 	{
 		randBuf := make([]byte, 16)
-		if _, err := RandReader.Read(randBuf); err != nil {
+		if _, err = RandReader.Read(randBuf); err != nil {
 			return nil, err
 		}
 		encryptedKey.CreateAttr("Id", fmt.Sprintf("_%x", randBuf))
@@ -71,7 +75,7 @@ func (e RSA) Encrypt(certificate interface{}, plaintext []byte) (*etree.Element,
 		innerKeyInfoEl := encryptedKey.CreateElement("ds:KeyInfo")
 		x509data := innerKeyInfoEl.CreateElement("ds:X509Data")
 		x509data.CreateElement("ds:X509Certificate").SetText(
-			base64.StdEncoding.EncodeToString(cert.Raw),
+			base64.StdEncoding.EncodeToString(certBuf),
 		)
 	}
 
@@ -94,7 +98,7 @@ func (e RSA) Encrypt(certificate interface{}, plaintext []byte) (*etree.Element,
 
 // Decrypt implements Decryptor. `key` must be an *rsa.PrivateKey.
 func (e RSA) Decrypt(key interface{}, ciphertextEl *etree.Element) ([]byte, error) {
-	rsaKey, err := validateRSAKeyIfPresent(key, ciphertextEl)
+	rsaKey, err := validateRSAKey(key, ciphertextEl)
 	if err != nil {
 		return nil, err
 	}
@@ -107,15 +111,14 @@ func (e RSA) Decrypt(key interface{}, ciphertextEl *etree.Element) ([]byte, erro
 	{
 		digestMethodEl := ciphertextEl.FindElement("./EncryptionMethod/DigestMethod")
 		if digestMethodEl == nil {
-			e.DigestMethod = SHA1
-		} else {
-			hashAlgorithmStr := digestMethodEl.SelectAttrValue("Algorithm", "")
-			digestMethod, ok := digestMethods[hashAlgorithmStr]
-			if !ok {
-				return nil, ErrAlgorithmNotImplemented(hashAlgorithmStr)
-			}
-			e.DigestMethod = digestMethod
+			return nil, fmt.Errorf("cannot find required DigestMethod element")
 		}
+		hashAlgorithmStr := digestMethodEl.SelectAttrValue("Algorithm", "")
+		digestMethod, ok := digestMethods[hashAlgorithmStr]
+		if !ok {
+			return nil, ErrAlgorithmNotImplemented(hashAlgorithmStr)
+		}
+		e.DigestMethod = digestMethod
 	}
 
 	return e.keyDecrypter(e, rsaKey, ciphertext)

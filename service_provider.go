@@ -16,29 +16,20 @@ import (
 	"time"
 
 	"github.com/beevik/etree"
-	dsig "github.com/russellhaering/goxmldsig"
-	"github.com/russellhaering/goxmldsig/etreeutils"
-
 	"github.com/crewjam/saml/logger"
 	"github.com/crewjam/saml/xmlenc"
+	dsig "github.com/russellhaering/goxmldsig"
+	"github.com/russellhaering/goxmldsig/etreeutils"
 )
 
 // NameIDFormat is the format of the id
 type NameIDFormat string
 
-// Element returns an XML element representation of n.
-func (n NameIDFormat) Element() *etree.Element {
-	el := etree.NewElement("")
-	el.SetText(string(n))
-	return el
-}
-
 // Name ID formats
 const (
-	UnspecifiedNameIDFormat  NameIDFormat = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
+	UnspecifiedNameIDFormat  NameIDFormat = "urn:oasis:names:tc:SAML:2.0:nameid-format:unspecified"
 	TransientNameIDFormat    NameIDFormat = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"
-	EmailAddressNameIDFormat NameIDFormat = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
-	PersistentNameIDFormat   NameIDFormat = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+	EmailAddressNameIDFormat NameIDFormat = "urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress"
 )
 
 // ServiceProvider implements SAML Service provider.
@@ -55,8 +46,7 @@ type ServiceProvider struct {
 	Key *rsa.PrivateKey
 
 	// Certificate is the RSA public part of Key.
-	Certificate   *x509.Certificate
-	Intermediates []*x509.Certificate
+	Certificate *x509.Certificate
 
 	// MetadataURL is the full URL to the metadata endpoint on this host,
 	// i.e. https://example.com/saml/metadata
@@ -66,12 +56,8 @@ type ServiceProvider struct {
 	// on this host, i.e. https://example.com/saml/acs
 	AcsURL url.URL
 
-	// SloURL is the full URL to the SAML Single Logout endpoint on this host.
-	// i.e. https://example.com/saml/slo
-	SloURL url.URL
-
 	// IDPMetadata is the metadata from the identity provider.
-	IDPMetadata *EntityDescriptor
+	IDPMetadata *Metadata
 
 	// AuthnNameIDFormat is the format used in the NameIDPolicy for
 	// authentication requests
@@ -83,20 +69,13 @@ type ServiceProvider struct {
 
 	// Logger is used to log messages for example in the event of errors
 	Logger logger.Interface
-
-	// ForceAuthn allows you to force re-authentication of users even if the user
-	// has a SSO session at the IdP.
-	ForceAuthn *bool
-
-	// AllowIdpInitiated
-	AllowIDPInitiated bool
 }
 
 // MaxIssueDelay is the longest allowed time between when a SAML assertion is
 // issued by the IDP and the time it is received by ParseResponse. This is used
 // to prevent old responses from being replayed (while allowing for some clock
 // drift between the SP and IDP).
-var MaxIssueDelay = time.Second * 90
+const MaxIssueDelay = time.Second * 90
 
 // MaxClockSkew allows for leeway for clock skew between the IDP and SP when
 // validating assertions. It defaults to 180 seconds (matches shibboleth).
@@ -109,69 +88,44 @@ const DefaultValidDuration = time.Hour * 24 * 2
 const DefaultCacheDuration = time.Hour * 24 * 1
 
 // Metadata returns the service provider metadata
-func (sp *ServiceProvider) Metadata() *EntityDescriptor {
+func (sp *ServiceProvider) Metadata() *Metadata {
 	validDuration := DefaultValidDuration
 	if sp.MetadataValidDuration > 0 {
 		validDuration = sp.MetadataValidDuration
 	}
 
-	authnRequestsSigned := false
-	wantAssertionsSigned := true
-	validUntil := TimeNow().Add(validDuration)
-	certBytes := sp.Certificate.Raw
-	for _, intermediate := range sp.Intermediates {
-		certBytes = append(certBytes, intermediate.Raw...)
-	}
-	return &EntityDescriptor{
+	return &Metadata{
 		EntityID:   sp.MetadataURL.String(),
-		ValidUntil: validUntil,
-
-		SPSSODescriptors: []SPSSODescriptor{
-			{
-				SSODescriptor: SSODescriptor{
-					RoleDescriptor: RoleDescriptor{
-						ProtocolSupportEnumeration: "urn:oasis:names:tc:SAML:2.0:protocol",
-						KeyDescriptors: []KeyDescriptor{
-							{
-								Use: "signing",
-								KeyInfo: KeyInfo{
-									Certificate: base64.StdEncoding.EncodeToString(certBytes),
-								},
-							},
-							{
-								Use: "encryption",
-								KeyInfo: KeyInfo{
-									Certificate: base64.StdEncoding.EncodeToString(certBytes),
-								},
-								EncryptionMethods: []EncryptionMethod{
-									{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes128-cbc"},
-									{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes192-cbc"},
-									{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes256-cbc"},
-									{Algorithm: "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p"},
-								},
-							},
-						},
-						ValidUntil: &validUntil,
-					},
-					SingleLogoutServices: []Endpoint{
-						{
-							Binding:          HTTPPostBinding,
-							Location:         sp.SloURL.String(),
-							ResponseLocation: sp.SloURL.String(),
-						},
+		ValidUntil: TimeNow().Add(validDuration),
+		SPSSODescriptor: &SPSSODescriptor{
+			AuthnRequestsSigned:        false,
+			WantAssertionsSigned:       true,
+			ProtocolSupportEnumeration: "urn:oasis:names:tc:SAML:2.0:protocol",
+			KeyDescriptor: []KeyDescriptor{
+				{
+					Use: "signing",
+					KeyInfo: KeyInfo{
+						Certificate: base64.StdEncoding.EncodeToString(sp.Certificate.Raw),
 					},
 				},
-				AuthnRequestsSigned:  &authnRequestsSigned,
-				WantAssertionsSigned: &wantAssertionsSigned,
-
-				AssertionConsumerServices: []IndexedEndpoint{
-					{
-						Binding:  HTTPPostBinding,
-						Location: sp.AcsURL.String(),
-						Index:    1,
+				{
+					Use: "encryption",
+					KeyInfo: KeyInfo{
+						Certificate: base64.StdEncoding.EncodeToString(sp.Certificate.Raw),
+					},
+					EncryptionMethods: []EncryptionMethod{
+						{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes128-cbc"},
+						{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes192-cbc"},
+						{Algorithm: "http://www.w3.org/2001/04/xmlenc#aes256-cbc"},
+						{Algorithm: "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p"},
 					},
 				},
 			},
+			AssertionConsumerService: []IndexedEndpoint{{
+				Binding:  HTTPPostBinding,
+				Location: sp.AcsURL.String(),
+				Index:    1,
+			}},
 		},
 	}
 }
@@ -192,9 +146,7 @@ func (req *AuthnRequest) Redirect(relayState string) *url.URL {
 	w := &bytes.Buffer{}
 	w1 := base64.NewEncoder(base64.StdEncoding, w)
 	w2, _ := flate.NewWriter(w1, 9)
-	doc := etree.NewDocument()
-	doc.SetRoot(req.Element())
-	if _, err := doc.WriteTo(w2); err != nil {
+	if err := xml.NewEncoder(w2).Encode(req); err != nil {
 		panic(err)
 	}
 	w2.Close()
@@ -215,84 +167,67 @@ func (req *AuthnRequest) Redirect(relayState string) *url.URL {
 // GetSSOBindingLocation returns URL for the IDP's Single Sign On Service binding
 // of the specified type (HTTPRedirectBinding or HTTPPostBinding)
 func (sp *ServiceProvider) GetSSOBindingLocation(binding string) string {
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
-		for _, singleSignOnService := range idpSSODescriptor.SingleSignOnServices {
-			if singleSignOnService.Binding == binding {
-				return singleSignOnService.Location
-			}
+	for _, singleSignOnService := range sp.IDPMetadata.IDPSSODescriptor.SingleSignOnService {
+		if singleSignOnService.Binding == binding {
+			return singleSignOnService.Location
 		}
 	}
 	return ""
 }
 
-// GetSLOBindingLocation returns URL for the IDP's Single Log Out Service binding
-// of the specified type (HTTPRedirectBinding or HTTPPostBinding)
-func (sp *ServiceProvider) GetSLOBindingLocation(binding string) string {
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
-		for _, singleLogoutService := range idpSSODescriptor.SingleLogoutServices {
-			if singleLogoutService.Binding == binding {
-				return singleLogoutService.Location
-			}
-		}
-	}
-	return ""
-}
-
-// getIDPSigningCerts returns the certificates which we can use to verify things
+// getIDPSigningCert returns the certificate which we can use to verify things
 // signed by the IDP in PEM format, or nil if no such certificate is found.
-func (sp *ServiceProvider) getIDPSigningCerts() ([]*x509.Certificate, error) {
-	var certStrs []string
-	for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
-		for _, keyDescriptor := range idpSSODescriptor.KeyDescriptors {
-			if keyDescriptor.Use == "signing" {
-				certStrs = append(certStrs, keyDescriptor.KeyInfo.Certificate)
-			}
+func (sp *ServiceProvider) getIDPSigningCert() (*x509.Certificate, error) {
+	certStr := ""
+	for _, keyDescriptor := range sp.IDPMetadata.IDPSSODescriptor.KeyDescriptor {
+		if keyDescriptor.Use == "signing" {
+			certStr = keyDescriptor.KeyInfo.Certificate
+			break
 		}
 	}
 
 	// If there are no explicitly signing certs, just return the first
 	// non-empty cert we find.
-	if len(certStrs) == 0 {
-		for _, idpSSODescriptor := range sp.IDPMetadata.IDPSSODescriptors {
-			for _, keyDescriptor := range idpSSODescriptor.KeyDescriptors {
-				if keyDescriptor.Use == "" && keyDescriptor.KeyInfo.Certificate != "" {
-					certStrs = append(certStrs, keyDescriptor.KeyInfo.Certificate)
-					break
-				}
+	if certStr == "" {
+		for _, keyDescriptor := range sp.IDPMetadata.IDPSSODescriptor.KeyDescriptor {
+			if keyDescriptor.Use == "" && keyDescriptor.KeyInfo.Certificate != "" {
+				certStr = keyDescriptor.KeyInfo.Certificate
+				break
 			}
 		}
 	}
 
-	if len(certStrs) == 0 {
+	if certStr == "" {
 		return nil, errors.New("cannot find any signing certificate in the IDP SSO descriptor")
 	}
 
-	var certs []*x509.Certificate
-
 	// cleanup whitespace
-	regex := regexp.MustCompile(`\s+`)
-	for _, certStr := range certStrs {
-		certStr = regex.ReplaceAllString(certStr, "")
-		certBytes, err := base64.StdEncoding.DecodeString(certStr)
-		if err != nil {
-			return nil, fmt.Errorf("cannot parse certificate: %s", err)
-		}
-
-		parsedCert, err := x509.ParseCertificate(certBytes)
-		if err != nil {
-			return nil, err
-		}
-		certs = append(certs, parsedCert)
+	certStr = regexp.MustCompile(`\s+`).ReplaceAllString(certStr, "")
+	certBytes, err := base64.StdEncoding.DecodeString(certStr)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse certificate: %s", err)
 	}
 
-	return certs, nil
+	parsedCert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, err
+	}
+	return parsedCert, nil
 }
 
 // MakeAuthenticationRequest produces a new AuthnRequest object for idpURL.
 func (sp *ServiceProvider) MakeAuthenticationRequest(idpURL string) (*AuthnRequest, error) {
+	var nameIDFormat NameIDFormat
+	switch sp.AuthnNameIDFormat {
+	case "":
+		// To maintain library back-compat, use "transient" if unset.
+		nameIDFormat = TransientNameIDFormat
+	case UnspecifiedNameIDFormat:
+		// Spec defines an empty value as "unspecified" so don't set one.
+	default:
+		nameIDFormat = sp.AuthnNameIDFormat
+	}
 
-	allowCreate := true
-	nameIDFormat := sp.nameIDFormat()
 	req := AuthnRequest{
 		AssertionConsumerServiceURL: sp.AcsURL.String(),
 		Destination:                 idpURL,
@@ -300,18 +235,17 @@ func (sp *ServiceProvider) MakeAuthenticationRequest(idpURL string) (*AuthnReque
 		ID:                          fmt.Sprintf("id-%x", randomBytes(20)),
 		IssueInstant:                TimeNow(),
 		Version:                     "2.0",
-		Issuer: &Issuer{
+		Issuer: Issuer{
 			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
 			Value:  sp.MetadataURL.String(),
 		},
-		NameIDPolicy: &NameIDPolicy{
-			AllowCreate: &allowCreate,
+		NameIDPolicy: NameIDPolicy{
+			AllowCreate: true,
 			// TODO(ross): figure out exactly policy we need
 			// urn:mace:shibboleth:1.0:nameIdentifier
 			// urn:oasis:names:tc:SAML:2.0:nameid-format:transient
-			Format: &nameIDFormat,
+			Format: string(nameIDFormat),
 		},
-		ForceAuthn: sp.ForceAuthn,
 	}
 	return &req, nil
 }
@@ -329,9 +263,7 @@ func (sp *ServiceProvider) MakePostAuthenticationRequest(relayState string) ([]b
 
 // Post returns an HTML form suitable for using the HTTP-POST binding with the request
 func (req *AuthnRequest) Post(relayState string) []byte {
-	doc := etree.NewDocument()
-	doc.SetRoot(req.Element())
-	reqBuf, err := doc.WriteToBytes()
+	reqBuf, err := xml.Marshal(req)
 	if err != nil {
 		panic(err)
 	}
@@ -343,8 +275,8 @@ func (req *AuthnRequest) Post(relayState string) []byte {
 		`<input type="hidden" name="RelayState" value="{{.RelayState}}" />` +
 		`<input id="SAMLSubmitButton" type="submit" value="Submit" />` +
 		`</form>` +
-		`<script>document.getElementById('SAMLSubmitButton').style.visibility="hidden";` +
-		`document.getElementById('SAMLRequestForm').submit();</script>`))
+		`<script>document.getElementById('SAMLSubmitButton').style.visibility="hidden";</script>` +
+		`<script>document.getElementById('SAMLRequestForm').submit();</script>`))
 	data := struct {
 		URL         string
 		SAMLRequest string
@@ -402,39 +334,6 @@ func (ivr *InvalidResponseError) Error() string {
 	return fmt.Sprintf("Authentication failed")
 }
 
-func responseIsSigned(response *etree.Document) (bool, error) {
-	signatureElement, err := findChild(response.Root(), "http://www.w3.org/2000/09/xmldsig#", "Signature")
-	if err != nil {
-		return false, err
-	}
-	return signatureElement != nil, nil
-}
-
-// validateDestination validates the Destination attribute.
-// If the response is signed, the Destination is required to be present.
-func (sp *ServiceProvider) validateDestination(response []byte, responseDom *Response) error {
-	responseXML := etree.NewDocument()
-	err := responseXML.ReadFromBytes(response)
-	if err != nil {
-		return err
-	}
-
-	signed, err := responseIsSigned(responseXML)
-	if err != nil {
-		return err
-	}
-
-	// Compare if the response is signed OR the Destination is provided.
-	// (Even if the response is not signed, if the Destination is set it must match.)
-	if signed || responseDom.Destination != "" {
-		if responseDom.Destination != sp.AcsURL.String() {
-			return fmt.Errorf("`Destination` does not match AcsURL (expected %q, actual %q)", sp.AcsURL.String(), responseDom.Destination)
-		}
-	}
-
-	return nil
-}
-
 // ParseResponse extracts the SAML IDP response received in req, validates
 // it, and returns the verified attributes of the request.
 //
@@ -459,37 +358,16 @@ func (sp *ServiceProvider) ParseResponse(req *http.Request, possibleRequestIDs [
 		return nil, retErr
 	}
 	retErr.Response = string(rawResponseBuf)
-	assertion, err := sp.ParseXMLResponse(rawResponseBuf, possibleRequestIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	return assertion, nil
-
-}
-
-func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleRequestIDs []string) (*Assertion, error) {
-	now := TimeNow()
-	var err error
-	retErr := &InvalidResponseError{
-		Now:      now,
-		Response: string(decodedResponseXML),
-	}
 
 	// do some validation first before we decrypt
 	resp := Response{}
-	if err := xml.Unmarshal([]byte(decodedResponseXML), &resp); err != nil {
+	if err := xml.Unmarshal(rawResponseBuf, &resp); err != nil {
 		retErr.PrivateErr = fmt.Errorf("cannot unmarshal response: %s", err)
 		return nil, retErr
 	}
-
-	if err := sp.validateDestination(decodedResponseXML, &resp); err != nil {
-		retErr.PrivateErr = err
+	if resp.Destination != sp.AcsURL.String() {
+		retErr.PrivateErr = fmt.Errorf("`Destination` does not match AcsURL (expected %q)", sp.AcsURL.String())
 		return nil, retErr
-	}
-
-	if sp.AllowIDPInitiated && len(possibleRequestIDs) == 0 {
-		possibleRequestIDs = append([]string{""})
 	}
 
 	requestIDvalid := false
@@ -520,7 +398,7 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 	if resp.EncryptedAssertion == nil {
 
 		doc := etree.NewDocument()
-		if err := doc.ReadFromBytes(decodedResponseXML); err != nil {
+		if err := doc.ReadFromBytes(rawResponseBuf); err != nil {
 			retErr.PrivateErr = err
 			return nil, retErr
 		}
@@ -543,22 +421,12 @@ func (sp *ServiceProvider) ParseXMLResponse(decodedResponseXML []byte, possibleR
 	// decrypt the response
 	if resp.EncryptedAssertion != nil {
 		doc := etree.NewDocument()
-		if err := doc.ReadFromBytes(decodedResponseXML); err != nil {
+		if err := doc.ReadFromBytes(rawResponseBuf); err != nil {
 			retErr.PrivateErr = err
 			return nil, retErr
 		}
-		var key interface{} = sp.Key
-		keyEl := doc.FindElement("//EncryptedAssertion/EncryptedKey")
-		if keyEl != nil {
-			key, err = xmlenc.Decrypt(sp.Key, keyEl)
-			if err != nil {
-				retErr.PrivateErr = fmt.Errorf("failed to decrypt key from response: %s", err)
-				return nil, retErr
-			}
-		}
-
 		el := doc.FindElement("//EncryptedAssertion/EncryptedData")
-		plaintextAssertion, err := xmlenc.Decrypt(key, el)
+		plaintextAssertion, err := xmlenc.Decrypt(sp.Key, el)
 		if err != nil {
 			retErr.PrivateErr = fmt.Errorf("failed to decrypt response: %s", err)
 			return nil, retErr
@@ -602,23 +470,21 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 	if assertion.Issuer.Value != sp.IDPMetadata.EntityID {
 		return fmt.Errorf("issuer is not %q", sp.IDPMetadata.EntityID)
 	}
-	for _, subjectConfirmation := range assertion.Subject.SubjectConfirmations {
-		requestIDvalid := false
-		for _, possibleRequestID := range possibleRequestIDs {
-			if subjectConfirmation.SubjectConfirmationData.InResponseTo == possibleRequestID {
-				requestIDvalid = true
-				break
-			}
+	requestIDvalid := false
+	for _, possibleRequestID := range possibleRequestIDs {
+		if assertion.Subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo == possibleRequestID {
+			requestIDvalid = true
+			break
 		}
-		if !requestIDvalid {
-			return fmt.Errorf("SubjectConfirmation one of the possible request IDs (%v)", possibleRequestIDs)
-		}
-		if subjectConfirmation.SubjectConfirmationData.Recipient != sp.AcsURL.String() {
-			return fmt.Errorf("SubjectConfirmation Recipient is not %s", sp.AcsURL.String())
-		}
-		if subjectConfirmation.SubjectConfirmationData.NotOnOrAfter.Add(MaxClockSkew).Before(now) {
-			return fmt.Errorf("SubjectConfirmationData is expired")
-		}
+	}
+	if !requestIDvalid {
+		return fmt.Errorf("SubjectConfirmation one of the possible request IDs (%v)", possibleRequestIDs)
+	}
+	if assertion.Subject.SubjectConfirmation.SubjectConfirmationData.Recipient != sp.AcsURL.String() {
+		return fmt.Errorf("SubjectConfirmation Recipient is not %s", sp.AcsURL.String())
+	}
+	if assertion.Subject.SubjectConfirmation.SubjectConfirmationData.NotOnOrAfter.Add(MaxClockSkew).Before(now) {
+		return fmt.Errorf("SubjectConfirmationData is expired")
 	}
 	if assertion.Conditions.NotBefore.Add(-MaxClockSkew).After(now) {
 		return fmt.Errorf("Conditions is not yet valid")
@@ -626,15 +492,8 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 	if assertion.Conditions.NotOnOrAfter.Add(MaxClockSkew).Before(now) {
 		return fmt.Errorf("Conditions is expired")
 	}
-
-	audienceRestrictionsValid := len(assertion.Conditions.AudienceRestrictions) == 0
-	for _, audienceRestriction := range assertion.Conditions.AudienceRestrictions {
-		if audienceRestriction.Audience.Value == sp.MetadataURL.String() {
-			audienceRestrictionsValid = true
-		}
-	}
-	if !audienceRestrictionsValid {
-		return fmt.Errorf("Conditions AudienceRestriction does not contain %q", sp.MetadataURL.String())
+	if assertion.Conditions.AudienceRestriction.Audience.Value != sp.MetadataURL.String() {
+		return fmt.Errorf("Conditions AudienceRestriction is not %q", sp.MetadataURL.String())
 	}
 	return nil
 }
@@ -711,13 +570,13 @@ func (sp *ServiceProvider) validateSigned(responseEl *etree.Element) error {
 
 // validateSignature returns nill iff the Signature embedded in the element is valid
 func (sp *ServiceProvider) validateSignature(el *etree.Element) error {
-	certs, err := sp.getIDPSigningCerts()
+	cert, err := sp.getIDPSigningCert()
 	if err != nil {
 		return err
 	}
 
 	certificateStore := dsig.MemoryX509CertificateStore{
-		Roots: certs,
+		Roots: []*x509.Certificate{cert},
 	}
 
 	validationContext := dsig.NewDefaultValidationContext(&certificateStore)
@@ -758,86 +617,4 @@ func (sp *ServiceProvider) validateSignature(el *etree.Element) error {
 
 	_, err = validationContext.Validate(el)
 	return err
-}
-
-// MakeLogoutRequest produces a new LogoutRequest object for idpURL.
-func (sp *ServiceProvider) MakeLogoutRequest(idpURL, nameID string) (*LogoutRequest, error) {
-
-	req := LogoutRequest{
-		ID:           fmt.Sprintf("id-%x", randomBytes(20)),
-		IssueInstant: TimeNow(),
-		Version:      "2.0",
-		Destination:  idpURL,
-		Issuer: &Issuer{
-			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
-			Value:  sp.MetadataURL.String(),
-		},
-		NameID: &NameID{
-			Format:          sp.nameIDFormat(),
-			Value:           nameID,
-			NameQualifier:   sp.IDPMetadata.EntityID,
-			SPNameQualifier: sp.Metadata().EntityID,
-		},
-	}
-	return &req, nil
-}
-
-// MakeRedirectLogoutRequest creates a SAML authentication request using
-// the HTTP-Redirect binding. It returns a URL that we will redirect the user to
-// in order to start the auth process.
-func (sp *ServiceProvider) MakeRedirectLogoutRequest(nameID string) (*LogoutRequest, error) {
-	return sp.MakeLogoutRequest(sp.GetSLOBindingLocation(HTTPRedirectBinding), nameID)
-}
-
-func (sp *ServiceProvider) nameIDFormat() string {
-	var nameIDFormat string
-	switch sp.AuthnNameIDFormat {
-	case "":
-		// To maintain library back-compat, use "transient" if unset.
-		nameIDFormat = string(TransientNameIDFormat)
-	case UnspecifiedNameIDFormat:
-		// Spec defines an empty value as "unspecified" so don't set one.
-	default:
-		nameIDFormat = string(sp.AuthnNameIDFormat)
-	}
-	return nameIDFormat
-}
-
-// ValidateLogoutResponse returns a nil error iff the logout request is valid.
-func (sp *ServiceProvider) ValidateLogoutResponse(r *http.Request) error {
-	r.ParseForm()
-	rawResponseBuf, err := base64.StdEncoding.DecodeString(r.PostForm.Get("SAMLResponse"))
-	if err != nil {
-		return fmt.Errorf("unable to parse base64: %s", err)
-	}
-
-	resp := LogoutResponse{}
-	if err := xml.Unmarshal(rawResponseBuf, &resp); err != nil {
-		return fmt.Errorf("cannot unmarshal response: %s", err)
-	}
-	if resp.Destination != sp.SloURL.String() {
-		return fmt.Errorf("`Destination` does not match SloURL (expected %q)", sp.SloURL.String())
-	}
-
-	now := time.Now()
-	if resp.IssueInstant.Add(MaxIssueDelay).Before(now) {
-		return fmt.Errorf("issueInstant expired at %s", resp.IssueInstant.Add(MaxIssueDelay))
-	}
-	if resp.Issuer.Value != sp.IDPMetadata.EntityID {
-		return fmt.Errorf("issuer does not match the IDP metadata (expected %q)", sp.IDPMetadata.EntityID)
-	}
-	if resp.Status.StatusCode.Value != StatusSuccess {
-		return fmt.Errorf("status code was not %s", StatusSuccess)
-	}
-
-	doc := etree.NewDocument()
-	if err := doc.ReadFromBytes(rawResponseBuf); err != nil {
-		return err
-	}
-	responseEl := doc.Root()
-	if err = sp.validateSigned(responseEl); err != nil {
-		return err
-	}
-
-	return nil
 }
