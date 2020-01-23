@@ -39,10 +39,6 @@ type AuthnRequest struct {
 	ProviderName                   string `xml:",attr"`
 }
 
-// LogoutRequest  represents the SAML object of the same name, a request from an IDP
-// to destroy a user's session.
-//
-// See http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf
 type LogoutRequest struct {
 	XMLName xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:protocol LogoutRequest"`
 
@@ -245,7 +241,7 @@ type NameIDPolicy struct {
 // Element returns an etree.Element representing the object in XML form.
 func (a *NameIDPolicy) Element() *etree.Element {
 	el := etree.NewElement("samlp:NameIDPolicy")
-	if a.Format != nil && *a.Format != "" {
+	if a.Format != nil {
 		el.CreateAttr("Format", *a.Format)
 	}
 	if a.SPNameQualifier != nil {
