@@ -10,7 +10,7 @@ import (
 
 	"github.com/themasterr/httperr"
 
-	"github.com/crewjam/saml"
+	"github.com/themasterr/saml"
 )
 
 // ParseMetadata parses arbitrary SAML IDP metadata.
