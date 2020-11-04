@@ -15,57 +15,6 @@ The core package contains the implementation of SAML. The package samlsp provide
 
 ## Breaking Changes
 
-Version 0.4.0 introduces a few breaking changes to the _samlsp_ package in order to make the package more extensible, and to clean up the interfaces a bit. The default behavior remains the same, but you can now provide interface implementations of _RequestTracker_ (which tracks pending requests), _Session_ (which handles maintaining a session) and _OnError_ which handles reporting errors.
-
-Public fields of _samlsp.Middleware_ have changed, so some usages may require adjustment. See [issue 231](https://github.com/themasterr/saml/issues/231) for details.
-
-The option to provide an IDP metadata **URL** has been deprecated. Instead, we recommend that you use the `FetchMetadata()` function, or fetch the metadata yourself and use the new `ParseMetadata()` function, and pass the metadata in _samlsp.Options.IDPMetadata_.
-
-Similarly, the _HTTPClient_ field is now deprecated because it was only used for fetching metdata, which is no longer directly implemented.
-
-The fields that manage how cookies are set are deprecated as well. To customize how cookies are managed, provide custom implementation of _RequestTracker_ and/or _Session_, perhaps by extending the default implementations.
-
-The deprecated fields have not been removed from the Options structure,
-
-don't need it any more other )
-
-We have
-
-In particular we have deprecated the following fields in
-_samlsp.Options_:
-
-- _Logger_ -- this was used to emit errors while
-
-IDPMetadataURL *url.URL // DEPRECATED: this field will be removed, instead use FetchMetadata
-HTTPClient *http.Client // DEPRECATED: this field will be removed, instead pass httpClient to FetchMetadata
-CookieMaxAge time.Duration // DEPRECATED: this field will be removed. Instead, assign a custom CookieRequestTracker or CookieSessionProvider
-CookieName string // DEPRECATED: this field will be removed. Instead, assign a custom CookieRequestTracker or CookieSessionProvider
-CookieDomain string // DEPRECATED: this field will be removed. Instead, assign a custom CookieRequestTracker or CookieSessionProvider
-CookieSecure
-
-URL url.URL
-Key *rsa.PrivateKey
-Certificate *x509.Certificate
-Intermediates []*x509.Certificate
-AllowIDPInitiated bool
-IDPMetadata *saml.EntityDescriptor
-ForceAuthn bool // TODO(ross): this should be \*bool
-
-    URL               url.URL
-    Key               *rsa.PrivateKey
-    Logger            logger.Interface
-    Certificate       *x509.Certificate
-    Intermediates     []*x509.Certificate
-    AllowIDPInitiated bool
-    IDPMetadata       *saml.EntityDescriptor
-    IDPMetadataURL    *url.URL
-    HTTPClient        *http.Client
-    CookieMaxAge      time.Duration
-    CookieName        string
-    CookieDomain      string
-    CookieSecure      bool
-    ForceAuthn        bool
-
 Note: between version 0.2.0 and the current master include changes to the API
 that will break your existing code a little.
 

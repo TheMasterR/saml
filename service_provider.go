@@ -19,6 +19,7 @@ import (
 	dsig "github.com/russellhaering/goxmldsig"
 	"github.com/russellhaering/goxmldsig/etreeutils"
 
+	"github.com/themasterr/saml/logger"
 	"github.com/themasterr/saml/xmlenc"
 )
 
@@ -39,14 +40,6 @@ const (
 	EmailAddressNameIDFormat NameIDFormat = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
 	PersistentNameIDFormat   NameIDFormat = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
 )
-
-// SignatureVerifier verifies a signature
-//
-// Can be implemented in order to override ServiceProvider's default
-// way of verifying signatures.
-type SignatureVerifier interface {
-	VerifySignature(validationContext *dsig.ValidationContext, el *etree.Element) error
-}
 
 // ServiceProvider implements SAML Service provider.
 //
@@ -88,16 +81,15 @@ type ServiceProvider struct {
 	// attribute in the metadata endpoint
 	MetadataValidDuration time.Duration
 
+	// Logger is used to log messages for example in the event of errors
+	Logger logger.Interface
+
 	// ForceAuthn allows you to force re-authentication of users even if the user
 	// has a SSO session at the IdP.
 	ForceAuthn *bool
 
 	// AllowIdpInitiated
 	AllowIDPInitiated bool
-
-	// SignatureVerifier, if non-nil, allows you to implement an alternative way
-	// to verify signatures.
-	SignatureVerifier SignatureVerifier
 }
 
 // MaxIssueDelay is the longest allowed time between when a SAML assertion is
@@ -780,10 +772,6 @@ func (sp *ServiceProvider) validateSignature(el *etree.Element) error {
 	el, err = etreeutils.NSDetatch(ctx, el)
 	if err != nil {
 		return err
-	}
-
-	if sp.SignatureVerifier != nil {
-		return sp.SignatureVerifier.VerifySignature(validationContext, el)
 	}
 
 	_, err = validationContext.Validate(el)
